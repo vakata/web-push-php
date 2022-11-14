@@ -57,7 +57,9 @@ class Encryption
         openssl_pkey_export($localKey, $localKeyPEM);
         $localPublicKey = openssl_pkey_get_details($localKey)['key'];
         $localPublicKeyDetails = (openssl_pkey_get_details(openssl_get_publickey($localPublicKey)));
-        $localPublicKey = hex2bin('04' . bin2hex($localPublicKeyDetails['ec']['x']) . bin2hex($localPublicKeyDetails['ec']['y']));
+        $localPublicKey = "\04" . 
+            str_pad($localPublicKeyDetails['ec']['x'], 32, "\0", STR_PAD_LEFT) .
+            str_pad($localPublicKeyDetails['ec']['y'], 32, "\0", STR_PAD_LEFT);
 
         $userPublicKeyPEM = '-----BEGIN PUBLIC KEY-----' . "\n" .
             chunk_split(

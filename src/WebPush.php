@@ -13,19 +13,10 @@ declare(strict_types=1);
 
 namespace Minishlink\WebPush;
 
-use Base64Url\Base64Url;
-use GuzzleHttp\Client;
-use GuzzleHttp\Exception\RequestException;
-use GuzzleHttp\Psr7\Request;
-use Psr\Http\Message\ResponseInterface;
+use vakata\jwt\JWT;
 
 class WebPush
 {
-    /**
-     * @var Client
-     */
-    protected $client;
-
     /**
      * @var array
      */
@@ -44,7 +35,7 @@ class WebPush
     /**
      * @var int Automatic padding of payloads, if disabled, trade security for bandwidth
      */
-    protected $automaticPadding = Encryption::MAX_COMPATIBILITY_PAYLOAD_LENGTH;
+    protected $automaticPadding = 0;
 
     /**
      * @var bool Reuse VAPID headers in the same flush session to improve performance
@@ -78,7 +69,6 @@ class WebPush
         if (!array_key_exists('timeout', $clientOptions) && isset($timeout)) {
             $clientOptions['timeout'] = $timeout;
         }
-        $this->client = new Client($clientOptions);
     }
 
     /**
@@ -113,10 +103,10 @@ class WebPush
      * @param array $auth Use this auth details instead of what you provided when creating WebPush
      * @throws \ErrorException
      */
-    public function sendOneNotification(SubscriptionInterface $subscription, ?string $payload = null, array $options = [], array $auth = []): MessageSentReport
+    public function sendOneNotification(SubscriptionInterface $subscription, ?string $payload = null, array $options = [], array $auth = [])
     {
         $this->queueNotification($subscription, $payload, $options, $auth);
-        return $this->flush()->current();
+        $this->flush();
     }
 
     /**
@@ -124,13 +114,11 @@ class WebPush
      *
      * @param null|int $batchSize Defaults the value defined in defaultOptions during instantiation (which defaults to 1000).
      *
-     * @return \Generator|MessageSentReport[]
      * @throws \ErrorException
      */
-    public function flush(?int $batchSize = null): \Generator
+    public function flush(?int $batchSize = null)
     {
         if (empty($this->notifications)) {
-            yield from [];
             return;
         }
 
@@ -147,10 +135,16 @@ class WebPush
             // for each endpoint server type
             $requests = $this->prepare($batch);
 
-            $promises = [];
-
             foreach ($requests as $request) {
-                // TODO: send request
+                var_dump($request);
+                var_dump(file_get_contents($request[0], false, stream_context_create([
+                    'http' => [
+                        'method' => 'POST',
+                        'header' => $request[1],
+                        'content' => $request[2],
+                        'ignore_errors' => true
+                    ]
+                ])));
             }
         }
 
@@ -191,14 +185,14 @@ class WebPush
                 ];
 
                 if ($contentEncoding === "aesgcm") {
-                    $headers['Encryption'] = 'salt='.Base64Url::encode($salt);
-                    $headers['Crypto-Key'] = 'dh='.Base64Url::encode($localPublicKey);
+                    $headers['Encryption'] = 'salt='.JWT::base64UrlEncode($salt);
+                    $headers['Crypto-Key'] = 'dh='.JWT::base64UrlEncode($localPublicKey);
                 }
 
                 $encryptionContentCodingHeader = Encryption::getContentCodingHeader($salt, $localPublicKey, $contentEncoding);
                 $content = $encryptionContentCodingHeader.$cipherText;
 
-                $headers['Content-Length'] = (string) Utils::safeStrlen($content);
+                $headers['Content-Length'] = mb_strlen($content, '8bit');
             } else {
                 $headers = [
                     'Content-Length' => '0',
@@ -236,45 +230,15 @@ class WebPush
                 }
             }
 
-            $requests[] = new Request('POST', $endpoint, $headers, $content);
+            $h = [];
+            foreach ($headers as $k => $v) {
+                $h[] = $k . ': ' . $v;
+            }
+
+            $requests[] = [ $endpoint, $h, $content ];
         }
 
         return $requests;
-    }
-
-    public function isAutomaticPadding(): bool
-    {
-        return $this->automaticPadding !== 0;
-    }
-
-    /**
-     * @return int
-     */
-    public function getAutomaticPadding()
-    {
-        return $this->automaticPadding;
-    }
-
-    /**
-     * @param int|bool $automaticPadding Max padding length
-     *
-     * @throws \Exception
-     */
-    public function setAutomaticPadding($automaticPadding): WebPush
-    {
-        if ($automaticPadding > Encryption::MAX_PAYLOAD_LENGTH) {
-            throw new \Exception('Automatic padding is too large. Max is '.Encryption::MAX_PAYLOAD_LENGTH.'. Recommended max is '.Encryption::MAX_COMPATIBILITY_PAYLOAD_LENGTH.' for compatibility reasons (see README).');
-        } elseif ($automaticPadding < 0) {
-            throw new \Exception('Padding length should be positive or zero.');
-        } elseif ($automaticPadding === true) {
-            $this->automaticPadding = Encryption::MAX_COMPATIBILITY_PAYLOAD_LENGTH;
-        } elseif ($automaticPadding === false) {
-            $this->automaticPadding = 0;
-        } else {
-            $this->automaticPadding = $automaticPadding;
-        }
-
-        return $this;
     }
 
     /**
@@ -339,7 +303,7 @@ class WebPush
         }
 
         if (!$vapidHeaders) {
-            $vapidHeaders = VAPID::getVapidHeaders($audience, $vapid['subject'], $vapid['publicKey'], $vapid['privateKey'], $contentEncoding);
+            $vapidHeaders = VAPID::getVapidHeaders($audience, $vapid['subject'], $vapid['publicKey'], $vapid['privateKey'], $vapid['privateKeyPEM'], $contentEncoding);
         }
 
         if ($this->reuseVAPIDHeaders) {

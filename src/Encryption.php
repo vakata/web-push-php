@@ -15,8 +15,6 @@ namespace Minishlink\WebPush;
 
 use vakata\jwt\JWT;
 
-// TODO: switch to openssl and vakata/jwt and base64urlencode
-
 class Encryption
 {
     public const MAX_PAYLOAD_LENGTH = 4078;
@@ -28,7 +26,7 @@ class Encryption
      */
     public static function padPayload(string $payload, int $maxLengthToPad, string $contentEncoding): string
     {
-        $payloadLen = Utils::safeStrlen($payload);
+        $payloadLen = mb_strlen($payload, '8bit');
         $padLen = $maxLengthToPad ? $maxLengthToPad - $payloadLen : 0;
 
         if ($contentEncoding === "aesgcm") {
@@ -49,84 +47,54 @@ class Encryption
      */
     public static function encrypt(string $payload, string $userPublicKey, string $userAuthToken, string $contentEncoding): array
     {
-        return self::deterministicEncrypt(
-            $payload,
-            $userPublicKey,
-            $userAuthToken,
-            $contentEncoding,
-            self::createLocalKeyObject(),
-            random_bytes(16)
-        );
-    }
-
-    /**
-     * @throws \ErrorException
-     */
-    public static function deterministicEncrypt(string $payload, string $userPublicKey, string $userAuthToken, string $contentEncoding, array $localKeyObject, string $salt): array
-    {
-        $userPublicKey = Base64Url::decode($userPublicKey);
-        $userAuthToken = Base64Url::decode($userAuthToken);
-
-        // get local key pair
-        if (count($localKeyObject) === 1) {
-            /** @var JWK $localJwk */
-            $localJwk = current($localKeyObject);
-            $localPublicKey = hex2bin(Utils::serializePublicKeyFromJWK($localJwk));
-        } else {
-            /** @var PrivateKey $localPrivateKeyObject */
-            [$localPublicKeyObject, $localPrivateKeyObject] = $localKeyObject;
-            $localPublicKey = hex2bin(Utils::serializePublicKey($localPublicKeyObject));
-            $localJwk = new JWK([
-                'kty' => 'EC',
-                'crv' => 'P-256',
-                'd' => Base64Url::encode($localPrivateKeyObject->getSecret()->toBytes(false)),
-                'x' => Base64Url::encode($localPublicKeyObject[0]),
-                'y' => Base64Url::encode($localPublicKeyObject[1]),
-            ]);
-        }
-        if (!$localPublicKey) {
-            throw new \ErrorException('Failed to convert local public key from hexadecimal to binary');
-        }
-
-        // get user public key object
-        [$userPublicKeyObjectX, $userPublicKeyObjectY] = Utils::unserializePublicKey($userPublicKey);
-        $userJwk = new JWK([
-            'kty' => 'EC',
-            'crv' => 'P-256',
-            'x' => Base64Url::encode($userPublicKeyObjectX),
-            'y' => Base64Url::encode($userPublicKeyObjectY),
+        $userPublicKey = JWT::base64UrlDecode($userPublicKey);
+        $userAuthToken = JWT::base64UrlDecode($userAuthToken);
+        $salt = random_bytes(16);
+        $localKey = openssl_pkey_new([
+            'curve_name'       => 'prime256v1',
+            'private_key_type' => OPENSSL_KEYTYPE_EC,
         ]);
+        openssl_pkey_export($localKey, $localKeyPEM);
+        $localPublicKey = openssl_pkey_get_details($localKey)['key'];
+        $localPublicKeyDetails = (openssl_pkey_get_details(openssl_get_publickey($localPublicKey)));
+        $localPublicKey = hex2bin('04' . bin2hex($localPublicKeyDetails['ec']['x']) . bin2hex($localPublicKeyDetails['ec']['y']));
 
-        // get shared secret from user public key and local private key
-
-        $sharedSecret = self::calculateAgreementKey($localJwk, $userJwk);
-
+        $userPublicKeyPEM = '-----BEGIN PUBLIC KEY-----' . "\n" .
+            chunk_split(
+                base64_encode(
+                    pack(
+                        'H*',
+                        '3059' // SEQUENCE, length 89
+                        . '3013' // SEQUENCE, length 19
+                        . '0607' // OID, length 7
+                        . '2a8648ce3d0201' // 1.2.840.10045.2.1 = EC Public Key
+                        . '0608' // OID, length 8
+                        . '2a8648ce3d030107' // 1.2.840.10045.3.1.7 = P-256 Curve
+                        . '0342' // BIT STRING, length 66
+                        . '00' // prepend with NUL - pubkey will follow
+                    ) .
+                    $userPublicKey
+                ),
+                64
+            ) .
+            '-----END PUBLIC KEY-----';
+        
+        $sharedSecret = openssl_pkey_derive($userPublicKeyPEM, $localKeyPEM, 256);
         $sharedSecret = str_pad($sharedSecret, 32, chr(0), STR_PAD_LEFT);
-
-        // section 4.3
         $ikm = self::getIKM($userAuthToken, $userPublicKey, $localPublicKey, $sharedSecret, $contentEncoding);
-
-        // section 4.2
         $context = self::createContext($userPublicKey, $localPublicKey, $contentEncoding);
-
-        // derive the Content Encryption Key
         $contentEncryptionKeyInfo = self::createInfo($contentEncoding, $context, $contentEncoding);
         $contentEncryptionKey = self::hkdf($salt, $ikm, $contentEncryptionKeyInfo, 16);
-
-        // section 3.3, derive the nonce
         $nonceInfo = self::createInfo('nonce', $context, $contentEncoding);
         $nonce = self::hkdf($salt, $ikm, $nonceInfo, 12);
-
-        // encrypt
-        // "The additional data passed to each invocation of AEAD_AES_128_GCM is a zero-length octet sequence."
         $tag = '';
-        $encryptedText = openssl_encrypt($payload, 'aes-128-gcm', $contentEncryptionKey, OPENSSL_RAW_DATA, $nonce, $tag);
+        $enc = openssl_encrypt($payload, 'aes-128-gcm', $contentEncryptionKey, OPENSSL_RAW_DATA, $nonce, $tag);
 
         // return values in url safe base64
         return [
             'localPublicKey' => $localPublicKey,
             'salt' => $salt,
-            'cipherText' => $encryptedText.$tag,
+            'cipherText' => $enc.$tag,
         ];
     }
 
@@ -135,7 +103,7 @@ class Encryption
         if ($contentEncoding === "aes128gcm") {
             return $salt
                 .pack('N*', 4096)
-                .pack('C*', Utils::safeStrlen($localPublicKey))
+                .pack('C*', mb_strlen($localPublicKey, '8bit'))
                 .$localPublicKey;
         }
 
@@ -186,12 +154,12 @@ class Encryption
             return null;
         }
 
-        if (Utils::safeStrlen($clientPublicKey) !== 65) {
+        if (mb_strlen($clientPublicKey, '8bit') !== 65) {
             throw new \ErrorException('Invalid client public key length');
         }
 
         // This one should never happen, because it's our code that generates the key
-        if (Utils::safeStrlen($serverPublicKey) !== 65) {
+        if (mb_strlen($serverPublicKey, '8bit') !== 65) {
             throw new \ErrorException('Invalid server public key length');
         }
 
@@ -217,7 +185,7 @@ class Encryption
                 throw new \ErrorException('Context must exist');
             }
 
-            if (Utils::safeStrlen($context) !== 135) {
+            if (mb_strlen($context, '8bit') !== 135) {
                 throw new \ErrorException('Context argument has invalid size');
             }
 
@@ -227,75 +195,6 @@ class Encryption
         }
 
         throw new \ErrorException('This content encoding is not supported.');
-    }
-
-    private static function createLocalKeyObject(): array
-    {
-        try {
-            return self::createLocalKeyObjectUsingOpenSSL();
-        } catch (\Exception $e) {
-            return self::createLocalKeyObjectUsingPurePhpMethod();
-        }
-    }
-
-    private static function createLocalKeyObjectUsingPurePhpMethod(): array
-    {
-        $curve = NistCurve::curve256();
-        $privateKey = $curve->createPrivateKey();
-        $publicKey = $curve->createPublicKey($privateKey);
-
-        if ($publicKey->getPoint()->getX() instanceof BigInteger) {
-            return [
-                new JWK([
-                    'kty' => 'EC',
-                    'crv' => 'P-256',
-                    'x' => Base64Url::encode(self::addNullPadding($publicKey->getPoint()->getX()->toBytes(false))),
-                    'y' => Base64Url::encode(self::addNullPadding($publicKey->getPoint()->getY()->toBytes(false))),
-                    'd' => Base64Url::encode(self::addNullPadding($privateKey->getSecret()->toBytes(false))),
-                ])
-            ];
-        }
-
-        return [
-            new JWK([
-                'kty' => 'EC',
-                'crv' => 'P-256',
-                'x' => Base64Url::encode(self::addNullPadding(hex2bin(gmp_strval($publicKey->getPoint()->getX(), 16)))),
-                'y' => Base64Url::encode(self::addNullPadding(hex2bin(gmp_strval($publicKey->getPoint()->getY(), 16)))),
-                'd' => Base64Url::encode(self::addNullPadding(hex2bin(gmp_strval($privateKey->getSecret(), 16)))),
-            ])
-        ];
-    }
-
-    private static function createLocalKeyObjectUsingOpenSSL(): array
-    {
-        $keyResource = openssl_pkey_new([
-            'curve_name'       => 'prime256v1',
-            'private_key_type' => OPENSSL_KEYTYPE_EC,
-        ]);
-
-        if (!$keyResource) {
-            throw new \RuntimeException('Unable to create the key');
-        }
-
-        $details = openssl_pkey_get_details($keyResource);
-        if (PHP_MAJOR_VERSION < 8) {
-            openssl_pkey_free($keyResource);
-        }
-
-        if (!$details) {
-            throw new \RuntimeException('Unable to get the key details');
-        }
-
-        return [
-            new JWK([
-                'kty' => 'EC',
-                'crv' => 'P-256',
-                'x' => Base64Url::encode(self::addNullPadding($details['ec']['x'])),
-                'y' => Base64Url::encode(self::addNullPadding($details['ec']['y'])),
-                'd' => Base64Url::encode(self::addNullPadding($details['ec']['d'])),
-            ])
-        ];
     }
 
     /**
@@ -316,76 +215,5 @@ class Encryption
         }
 
         return $sharedSecret;
-    }
-
-    private static function calculateAgreementKey(JWK $private_key, JWK $public_key): string
-    {
-        if (function_exists('openssl_pkey_derive')) {
-            try {
-                $publicPem = ECKey::convertPublicKeyToPEM($public_key);
-                $privatePem = ECKey::convertPrivateKeyToPEM($private_key);
-
-                $result = openssl_pkey_derive($publicPem, $privatePem, 256); // @phpstan-ignore-line
-                if ($result === false) {
-                    throw new \Exception('Unable to compute the agreement key');
-                }
-                return $result;
-            } catch (\Throwable $throwable) {
-                //Does nothing. Will fallback to the pure PHP function
-            }
-        }
-
-
-        $curve = NistCurve::curve256();
-        try {
-            $rec_x = self::convertBase64ToBigInteger($public_key->get('x'));
-            $rec_y = self::convertBase64ToBigInteger($public_key->get('y'));
-            $sen_d = self::convertBase64ToBigInteger($private_key->get('d'));
-            $priv_key = PrivateKey::create($sen_d);
-            $pub_key = $curve->getPublicKeyFrom($rec_x, $rec_y);
-
-            return hex2bin(str_pad($curve->mul($pub_key->getPoint(), $priv_key->getSecret())->getX()->toBase(16), 64, '0', STR_PAD_LEFT)); // @phpstan-ignore-line
-        } catch (\Throwable $e) {
-            $rec_x = self::convertBase64ToGMP($public_key->get('x'));
-            $rec_y = self::convertBase64ToGMP($public_key->get('y'));
-            $sen_d = self::convertBase64ToGMP($private_key->get('d'));
-            $priv_key = PrivateKey::create($sen_d); // @phpstan-ignore-line
-            $pub_key = $curve->getPublicKeyFrom($rec_x, $rec_y); // @phpstan-ignore-line
-
-            return hex2bin(gmp_strval($curve->mul($pub_key->getPoint(), $priv_key->getSecret())->getX(), 16)); // @phpstan-ignore-line
-        }
-    }
-
-    /**
-     * @throws \ErrorException
-     */
-    private static function convertBase64ToBigInteger(string $value): BigInteger
-    {
-        $value = unpack('H*', Base64Url::decode($value));
-
-        if ($value === false) {
-            throw new \ErrorException('Unable to unpack hex value from string');
-        }
-
-        return BigInteger::fromBase($value[1], 16);
-    }
-
-    /**
-     * @throws \ErrorException
-     */
-    private static function convertBase64ToGMP(string $value): \GMP
-    {
-        $value = unpack('H*', Base64Url::decode($value));
-
-        if ($value === false) {
-            throw new \ErrorException('Unable to unpack hex value from string');
-        }
-
-        return gmp_init($value[1], 16);
-    }
-
-    private static function addNullPadding(string $data): string
-    {
-        return str_pad($data, 32, chr(0), STR_PAD_LEFT);
     }
 }

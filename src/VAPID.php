@@ -13,9 +13,7 @@ declare(strict_types=1);
 
 namespace Minishlink\WebPush;
 
-use vakata\JWT;
-
-// TODO: switch to vakata/jwt and base64urlencode
+use vakata\jwt\JWT;
 
 class VAPID
 {
@@ -39,27 +37,13 @@ class VAPID
             }
         }
 
-        if (isset($vapid['pem'])) {
-            $jwk = JWKFactory::createFromKey($vapid['pem']);
-            if ($jwk->get('kty') !== 'EC' || !$jwk->has('d') || !$jwk->has('x') || !$jwk->has('y')) {
-                throw new \ErrorException('Invalid PEM data.');
-            }
-
-            $binaryPublicKey = hex2bin(Utils::serializePublicKeyFromJWK($jwk));
-            if (!$binaryPublicKey) {
-                throw new \ErrorException('Failed to convert VAPID public key from hexadecimal to binary');
-            }
-            $vapid['publicKey'] = base64_encode($binaryPublicKey);
-            $vapid['privateKey'] = base64_encode(str_pad(Base64Url::decode($jwk->get('d')), 2 * self::PRIVATE_KEY_LENGTH, '0', STR_PAD_LEFT));
-        }
-
         if (!isset($vapid['publicKey'])) {
             throw new \ErrorException('[VAPID] You must provide a public key.');
         }
 
-        $publicKey = Base64Url::decode($vapid['publicKey']);
+        $publicKey = JWT::base64UrlDecode($vapid['publicKey']);
 
-        if (Utils::safeStrlen($publicKey) !== self::PUBLIC_KEY_LENGTH) {
+        if (mb_strlen($publicKey, '8bit') !== self::PUBLIC_KEY_LENGTH) {
             throw new \ErrorException('[VAPID] Public key should be 65 bytes long when decoded.');
         }
 
@@ -67,9 +51,9 @@ class VAPID
             throw new \ErrorException('[VAPID] You must provide a private key.');
         }
 
-        $privateKey = Base64Url::decode($vapid['privateKey']);
+        $privateKey = JWT::base64UrlDecode($vapid['privateKey']);
 
-        if (Utils::safeStrlen($privateKey) !== self::PRIVATE_KEY_LENGTH) {
+        if (mb_strlen($privateKey, '8bit') !== self::PRIVATE_KEY_LENGTH) {
             throw new \ErrorException('[VAPID] Private key should be 32 bytes long when decoded.');
         }
 
@@ -77,6 +61,7 @@ class VAPID
             'subject' => $vapid['subject'],
             'publicKey' => $publicKey,
             'privateKey' => $privateKey,
+            'privateKeyPEM' => $vapid['privateKeyPEM'] ?? null,
         ];
     }
 
@@ -88,51 +73,30 @@ class VAPID
      * @param string $subject This should be a URL or a 'mailto:' email address
      * @param string $publicKey The decoded VAPID public key
      * @param string $privateKey The decoded VAPID private key
+     * @param string $pem The PEM private key
      * @param null|int $expiration The expiration of the VAPID JWT. (UNIX timestamp)
      *
      * @return array Returns an array with the 'Authorization' and 'Crypto-Key' values to be used as headers
      * @throws \ErrorException
      */
-    public static function getVapidHeaders(string $audience, string $subject, string $publicKey, string $privateKey, string $contentEncoding, ?int $expiration = null)
+    public static function getVapidHeaders(string $audience, string $subject, string $publicKey, string $privateKey, string $pem, string $contentEncoding, ?int $expiration = null)
     {
         $expirationLimit = time() + 43200; // equal margin of error between 0 and 24h
         if (null === $expiration || $expiration > $expirationLimit) {
             $expiration = $expirationLimit;
         }
 
-        $header = [
-            'typ' => 'JWT',
-            'alg' => 'ES256',
-        ];
-
-        $jwtPayload = json_encode([
+        $jwt = (new JWT([
             'aud' => $audience,
             'exp' => $expiration,
             'sub' => $subject,
-        ], JSON_UNESCAPED_SLASHES | JSON_NUMERIC_CHECK);
-        if (!$jwtPayload) {
-            throw new \ErrorException('Failed to encode JWT payload in JSON');
-        }
+        ]))
+            ->setHeader('alg', 'ES256')
+            ->setHeader('typ', 'JWT')
+            ->sign($pem)
+            ->toString();
 
-        [$x, $y] = Utils::unserializePublicKey($publicKey);
-        $jwk = new JWK([
-            'kty' => 'EC',
-            'crv' => 'P-256',
-            'x' => Base64Url::encode($x),
-            'y' => Base64Url::encode($y),
-            'd' => Base64Url::encode($privateKey),
-        ]);
-
-        $jwsCompactSerializer = new CompactSerializer();
-        $jwsBuilder = new JWSBuilder(new AlgorithmManager([new ES256()]));
-        $jws = $jwsBuilder
-            ->create()
-            ->withPayload($jwtPayload)
-            ->addSignature($jwk, $header)
-            ->build();
-
-        $jwt = $jwsCompactSerializer->serialize($jws, 0);
-        $encodedPublicKey = Base64Url::encode($publicKey);
+        $encodedPublicKey = JWT::base64UrlEncode($publicKey);
 
         if ($contentEncoding === "aesgcm") {
             return [
@@ -148,31 +112,5 @@ class VAPID
         }
 
         throw new \ErrorException('This content encoding is not supported');
-    }
-
-    /**
-     * This method creates VAPID keys in case you would not be able to have a Linux bash.
-     * DO NOT create keys at each initialization! Save those keys and reuse them.
-     *
-     * @throws \ErrorException
-     */
-    public static function createVapidKeys(): array
-    {
-        $jwk = JWKFactory::createECKey('P-256');
-
-        $binaryPublicKey = hex2bin(Utils::serializePublicKeyFromJWK($jwk));
-        if (!$binaryPublicKey) {
-            throw new \ErrorException('Failed to convert VAPID public key from hexadecimal to binary');
-        }
-
-        $binaryPrivateKey = hex2bin(str_pad(bin2hex(Base64Url::decode($jwk->get('d'))), 2 * self::PRIVATE_KEY_LENGTH, '0', STR_PAD_LEFT));
-        if (!$binaryPrivateKey) {
-            throw new \ErrorException('Failed to convert VAPID private key from hexadecimal to binary');
-        }
-
-        return [
-            'publicKey'  => Base64Url::encode($binaryPublicKey),
-            'privateKey' => Base64Url::encode($binaryPrivateKey)
-        ];
     }
 }

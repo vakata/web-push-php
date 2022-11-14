@@ -14,9 +14,8 @@ declare(strict_types=1);
 namespace Minishlink\WebPush;
 
 use Base64Url\Base64Url;
-use Brick\Math\BigInteger;
-use Jose\Component\Core\JWK;
-use Jose\Component\Core\Util\Ecc\PublicKey;
+
+// TODO: remove unneccessary math and extensions and methods
 
 class Utils
 {

@@ -67,25 +67,6 @@ class WebPush
      */
     public function __construct(array $auth = [], array $defaultOptions = [], ?int $timeout = 30, array $clientOptions = [])
     {
-        $extensions = [
-            'curl' => '[WebPush] curl extension is not loaded but is required. You can fix this in your php.ini.',
-            'mbstring' => '[WebPush] mbstring extension is not loaded but is required for sending push notifications with payload or for VAPID authentication. You can fix this in your php.ini.',
-            'openssl' => '[WebPush] openssl extension is not loaded but is required for sending push notifications with payload or for VAPID authentication. You can fix this in your php.ini.',
-        ];
-        $phpVersion = phpversion();
-        if ($phpVersion && version_compare($phpVersion, '7.3.0', '<')) {
-            $extensions['gmp'] = '[WebPush] gmp extension is not loaded but is required for sending push notifications with payload or for VAPID authentication. You can fix this in your php.ini.';
-        }
-        foreach ($extensions as $extension => $message) {
-            if (!extension_loaded($extension)) {
-                trigger_error($message, E_USER_WARNING);
-            }
-        }
-
-        if (ini_get('mbstring.func_overload') >= 2) {
-            trigger_error("[WebPush] mbstring.func_overload is enabled for str* functions. You must disable it if you want to send push notifications with payload or use VAPID. You can fix this in your php.ini.", E_USER_NOTICE);
-        }
-
         if (isset($auth['VAPID'])) {
             $auth['VAPID'] = VAPID::validate($auth['VAPID']);
         }
@@ -111,10 +92,6 @@ class WebPush
     public function queueNotification(SubscriptionInterface $subscription, ?string $payload = null, array $options = [], array $auth = []): void
     {
         if (isset($payload)) {
-            if (Utils::safeStrlen($payload) > Encryption::MAX_PAYLOAD_LENGTH) {
-                throw new \ErrorException('Size of payload must not be greater than '.Encryption::MAX_PAYLOAD_LENGTH.' octets.');
-            }
-
             $contentEncoding = $subscription->getContentEncoding();
             if (!$contentEncoding) {
                 throw new \ErrorException('Subscription should have a content encoding');
@@ -173,24 +150,7 @@ class WebPush
             $promises = [];
 
             foreach ($requests as $request) {
-                $promises[] = $this->client->sendAsync($request)
-                    ->then(function ($response) use ($request) {
-                        /** @var ResponseInterface $response * */
-                        return new MessageSentReport($request, $response);
-                    })
-                    ->otherwise(function ($reason) {
-                        /** @var RequestException $reason **/
-                        if (method_exists($reason, 'getResponse')) {
-                            $response = $reason->getResponse();
-                        } else {
-                            $response = null;
-                        }
-                        return new MessageSentReport($reason->getRequest(), $response, false, $reason->getMessage());
-                    });
-            }
-
-            foreach ($promises as $promise) {
-                yield $promise->wait();
+                // TODO: send request
             }
         }
 
@@ -206,7 +166,6 @@ class WebPush
     {
         $requests = [];
         foreach ($notifications as $notification) {
-            \assert($notification instanceof Notification);
             $subscription = $notification->getSubscription();
             $endpoint = $subscription->getEndpoint();
             $userPublicKey = $subscription->getPublicKey();

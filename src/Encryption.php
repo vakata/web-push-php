@@ -13,12 +13,9 @@ declare(strict_types=1);
 
 namespace Minishlink\WebPush;
 
-use Base64Url\Base64Url;
-use Brick\Math\BigInteger;
-use Jose\Component\Core\JWK;
-use Jose\Component\Core\Util\Ecc\NistCurve;
-use Jose\Component\Core\Util\Ecc\PrivateKey;
-use Jose\Component\Core\Util\ECKey;
+use vakata\jwt\JWT;
+
+// TODO: switch to openssl and vakata/jwt and base64urlencode
 
 class Encryption
 {

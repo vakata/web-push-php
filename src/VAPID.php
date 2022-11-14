@@ -13,13 +13,9 @@ declare(strict_types=1);
 
 namespace Minishlink\WebPush;
 
-use Base64Url\Base64Url;
-use Jose\Component\Core\AlgorithmManager;
-use Jose\Component\Core\JWK;
-use Jose\Component\KeyManagement\JWKFactory;
-use Jose\Component\Signature\Algorithm\ES256;
-use Jose\Component\Signature\JWSBuilder;
-use Jose\Component\Signature\Serializer\CompactSerializer;
+use vakata\JWT;
+
+// TODO: switch to vakata/jwt and base64urlencode
 
 class VAPID
 {

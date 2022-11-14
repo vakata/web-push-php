@@ -136,15 +136,14 @@ class WebPush
             $requests = $this->prepare($batch);
 
             foreach ($requests as $request) {
-                var_dump($request);
-                var_dump(file_get_contents($request[0], false, stream_context_create([
+                @file_get_contents($request[0], false, stream_context_create([
                     'http' => [
                         'method' => 'POST',
                         'header' => $request[1],
                         'content' => $request[2],
                         'ignore_errors' => true
                     ]
-                ])));
+                ]));
             }
         }
 

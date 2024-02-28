@@ -17,7 +17,7 @@
     "ext-json": "*",
     "ext-mbstring": "*",
     "ext-openssl": "*",
-    "vakata/jwt": "^3.0.4"
+    "vakata/jwt": "^4.0.0"
   },
   "autoload": {
     "psr-4" : {
